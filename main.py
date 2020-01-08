@@ -40,6 +40,23 @@ class StreamingOutput(object):
             self.buffer.seek(0)
         return self.buffer.write(buf)
 
+class MotionOutput(object):
+    def __init__(self):
+        self.frame = None
+        self.buffer = io.BytesIO()
+        self.condition = Condition()
+
+    def write(self, buf):
+        self.buffer.seek(0)
+        ret = self.buffer.write(buf)
+        self.buffer.truncate()
+
+        with self.condition:
+            self.frame = self.buffer.getvalue()
+            self.condition.notify_all()
+
+        return ret
+
 class WebHandler(server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/':
@@ -71,11 +88,31 @@ class WebHandler(server.BaseHTTPRequestHandler):
                 logging.warning(
                     'Removed streaming client %s: %s',
                     self.client_address, str(e))
+        elif self.path == '/motion.bin':
+            self.send_response(200)
+            self.send_header('Age', 0)
+            self.send_header('Cache-Control', 'no-cache, private')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Content-Type', 'binary/octet-stream')
+
+            try:
+                with self.server.motionOutput.condition:
+                    self.server.motionOutput.condition.wait()
+                    frame = self.server.motionOutput.frame
+                
+                self.send_header('Content-Length', len(frame))
+                self.end_headers()
+
+                self.wfile.write(frame)
+            except Exception as e:
+                logging.warning('Error getting frame %s', str(e))
+
         elif self.path == '/frame.jpg':
             self.send_response(200)
             self.send_header('Age', 0)
             self.send_header('Cache-Control', 'no-cache, private')
             self.send_header('Pragma', 'no-cache')
+            self.send_header('Content-Type', 'image/jpeg')
 
             try:
                 with self.server.output.condition:
@@ -168,9 +205,10 @@ class WebServer(socketserver.ThreadingMixIn, server.HTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, output, *args, **kwargs):
+    def __init__(self, output, motionOutput, *args, **kwargs):
         super(WebServer, self).__init__(*args, **kwargs)
         self.output = output
+        self.motionOutput = motionOutput
 
 # Accept a single connection and make a file-like object out of it
 # connection = server_socket.accept()[0].makefile('wb')
@@ -180,12 +218,13 @@ camera.resolution = (1440, 1080)
 camera.framerate = 24
 server = SocketServer('0.0.0.0', 8000)
 output = StreamingOutput()
-webServer = WebServer(output, ('', 8080), WebHandler)
+motionOutput = MotionOutput()
+webServer = WebServer(output, motionOutput, ('', 8080), WebHandler)
     
 
 try:
     camera.start_recording(output, format='mjpeg', splitter_port=2, resize=(640,480))
-    camera.start_recording(server, format='h264', level='4.2', profile='high')
+    camera.start_recording(server, format='h264', level='4.2', profile='high', intra_refresh='cyclic', inline_headers=True, sps_timing=True, motion_output=motionOutput )
     webServer.serve_forever()
 except KeyboardInterrupt:
     camera.stop_recording()
