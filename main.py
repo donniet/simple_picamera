@@ -2,6 +2,7 @@ import socket
 import time
 import logging
 import picamera
+import re
 import threading
 from threading import Condition
 import socketserver
@@ -59,14 +60,18 @@ class MotionOutput(object):
 
 class WebHandler(server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == '/':
+        m = re.search('^([^\?]+)\??.*$', self.path)
+
+        path = m.group(1)
+
+        if path == '/':
             content = index_HTML.encode('utf-8')
             self.send_response(200)
             self.send_header('Content-Type', 'text/html')
             self.send_header('Content-Length', len(content))
             self.end_headers()
             self.wfile.write(content)
-        elif self.path == '/stream.mjpg':
+        elif path == '/video.jpg':
             self.send_response(200)
             self.send_header('Age', 0)
             self.send_header('Cache-Control', 'no-cache, private')
@@ -88,7 +93,7 @@ class WebHandler(server.BaseHTTPRequestHandler):
                 logging.warning(
                     'Removed streaming client %s: %s',
                     self.client_address, str(e))
-        elif self.path == '/motion.bin':
+        elif path == '/motion.bin':
             self.send_response(200)
             self.send_header('Age', 0)
             self.send_header('Cache-Control', 'no-cache, private')
@@ -107,7 +112,7 @@ class WebHandler(server.BaseHTTPRequestHandler):
             except Exception as e:
                 logging.warning('Error getting frame %s', str(e))
 
-        elif self.path == '/frame.jpg':
+        elif path == '/frame.jpg':
             self.send_response(200)
             self.send_header('Age', 0)
             self.send_header('Cache-Control', 'no-cache, private')
@@ -210,16 +215,20 @@ class WebServer(socketserver.ThreadingMixIn, server.HTTPServer):
         self.output = output
         self.motionOutput = motionOutput
 
+    def log_message(format, *args, **kwargs):
+	pass
+
 # Accept a single connection and make a file-like object out of it
 # connection = server_socket.accept()[0].makefile('wb')
 
 camera = picamera.PiCamera()
-camera.resolution = (1440, 1080)
+#camera.resolution = (1440, 1080)
+camera.resolution = (1640, 1248)
 camera.framerate = 24
 server = SocketServer('0.0.0.0', 8000)
 output = StreamingOutput()
 motionOutput = MotionOutput()
-webServer = WebServer(output, motionOutput, ('', 8080), WebHandler)
+webServer = WebServer(output, motionOutput, ('', 8888), WebHandler)
     
 
 try:
@@ -227,10 +236,12 @@ try:
     camera.start_recording(server, format='h264', level='4.2', profile='high', intra_refresh='cyclic', inline_headers=True, sps_timing=True, motion_output=motionOutput )
     webServer.serve_forever()
 except KeyboardInterrupt:
-    camera.stop_recording()
-    camera.stop_recording(splitter_port=2)
-    server.close()
-    webServer.shutdown()
+    pass
+
+camera.stop_recording()
+camera.stop_recording(splitter_port=2)
+server.close()
+webServer.shutdown()
 
 # camera.stop_recording()
 # server.close()

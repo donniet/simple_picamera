@@ -1,0 +1,13 @@
+[Unit]
+Description=Start Picamera
+After=network.target
+
+[Service]
+User=pi
+Group=pi
+ExecStart=/home/pi/src/picamera/venv/bin/python /home/pi/src/picamera/main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
