@@ -59,6 +59,9 @@ class MotionOutput(object):
         return ret
 
 class WebHandler(server.BaseHTTPRequestHandler):
+    def log_message(*args, **kwargs):
+        pass
+
     def do_GET(self):
         m = re.search('^([^\?]+)\??.*$', self.path)
 
@@ -214,9 +217,11 @@ class WebServer(socketserver.ThreadingMixIn, server.HTTPServer):
         super(WebServer, self).__init__(*args, **kwargs)
         self.output = output
         self.motionOutput = motionOutput
+    def log_request(*args, **kwargs):
+        pass
 
     def log_message(format, *args, **kwargs):
-	pass
+        pass
 
 # Accept a single connection and make a file-like object out of it
 # connection = server_socket.accept()[0].makefile('wb')
