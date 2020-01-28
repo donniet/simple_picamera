@@ -59,7 +59,7 @@ class MotionOutput(object):
         return ret
 
 class WebHandler(server.BaseHTTPRequestHandler):
-    def log_message(*args, **kwargs):
+    def log_message(self, *args, **kwargs):
         pass
 
     def do_GET(self):
@@ -211,17 +211,12 @@ class SocketServer(object):
         
 class WebServer(socketserver.ThreadingMixIn, server.HTTPServer):
     allow_reuse_address = True
-    daemon_threads = True
+    # daemon_threads = True
 
     def __init__(self, output, motionOutput, *args, **kwargs):
         super(WebServer, self).__init__(*args, **kwargs)
         self.output = output
         self.motionOutput = motionOutput
-    def log_request(*args, **kwargs):
-        pass
-
-    def log_message(format, *args, **kwargs):
-        pass
 
 # Accept a single connection and make a file-like object out of it
 # connection = server_socket.accept()[0].makefile('wb')
