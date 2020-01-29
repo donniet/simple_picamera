@@ -105,7 +105,8 @@ class WebHandler(server.BaseHTTPRequestHandler):
 
             try:
                 with self.server.motionOutput.condition:
-                    self.server.motionOutput.condition.wait()
+                    # no need to wait, just get the frame
+                    # self.server.motionOutput.condition.wait()
                     frame = self.server.motionOutput.frame
                 
                 self.send_header('Content-Length', len(frame))
@@ -113,7 +114,7 @@ class WebHandler(server.BaseHTTPRequestHandler):
 
                 self.wfile.write(frame)
             except Exception as e:
-                logging.warning('Error getting frame %s', str(e))
+                logging.warning('Error getting motion %s', str(e))
 
         elif path == '/frame.jpg':
             self.send_response(200)
@@ -124,7 +125,8 @@ class WebHandler(server.BaseHTTPRequestHandler):
 
             try:
                 with self.server.output.condition:
-                    self.server.output.condition.wait()
+                    # no need to wait, just get the frame
+                    # self.server.output.condition.wait()
                     frame = self.server.output.frame
                 
                 self.send_header('Content-Length', len(frame))
