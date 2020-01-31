@@ -19,7 +19,12 @@ index_HTML = """\
         <title>simple picamera</title>
     </head>
     <body>
-        <h1>Hello!</h1>
+        <ul>
+            <li><a href="frame.jpg">Frame</a></li>
+            <li><a href="motion.bin">Motion Vectors</a></li>
+            <li><a href="video.jpg">MJPEG Video</a></li>
+            <li>H264 Streaming Port: 8000</li>
+        </ul>
     </body>
 </html>
 """
@@ -35,28 +40,38 @@ class StreamingOutput(object):
             # New frame, copy the existing buffer's content and notify all
             # clients it's available
             self.buffer.truncate()
+
             with self.condition:
                 self.frame = self.buffer.getvalue()
-                self.condition.notify_all()
+            
+            self.condition.notify_all()
             self.buffer.seek(0)
+
+
         return self.buffer.write(buf)
 
 class MotionOutput(object):
     def __init__(self):
-        self.frame = None
         self.buffer = io.BytesIO()
         self.condition = Condition()
 
     def write(self, buf):
-        self.buffer.seek(0)
-        ret = self.buffer.write(buf)
-        self.buffer.truncate()
-
         with self.condition:
-            self.frame = self.buffer.getvalue()
-            self.condition.notify_all()
+            self.buffer.seek(0)
+            ret = self.buffer.write(buf)
+            self.buffer.truncate()
+        
+        self.condition.notify_all()
 
         return ret
+
+    def readinto(self, writer):
+        with self.condition:
+            # self.condition.wait()
+
+            writer.write(self.buffer.getvalue())
+
+
 
 class WebHandler(server.BaseHTTPRequestHandler):
     def log_message(self, *args, **kwargs):
@@ -107,12 +122,12 @@ class WebHandler(server.BaseHTTPRequestHandler):
                 with self.server.motionOutput.condition:
                     # no need to wait, just get the frame
                     # self.server.motionOutput.condition.wait()
-                    frame = self.server.motionOutput.frame
+                    frame = self.server.motionOutput.buffer.getvalue()
                 
-                self.send_header('Content-Length', len(frame))
-                self.end_headers()
+                    self.send_header('Content-Length', len(frame))
+                    self.end_headers()
 
-                self.wfile.write(frame)
+                    self.wfile.write(frame)
             except Exception as e:
                 logging.warning('Error getting motion %s', str(e))
 
@@ -162,20 +177,17 @@ class SocketServer(object):
 
             print('accepted: {}'.format(addr))
 
-            self.lock.acquire()
-            self.connections[addr] = conn.makefile('wb')
-            self.lock.release()
+            with self.lock:
+                self.connections[addr] = conn.makefile('wb')
+            
+        with self.lock:
+            for addr in self.connections:
+                self.connections[addr].close()
         
-        self.lock.acquire()
-        for addr in self.connections:
-            self.connections[addr].close()
-        self.lock.release()
-
     def write(self, buf):
-        self.lock.acquire()
-        conns = self.connections.copy()
-        self.lock.release()
-
+        with self.lock:
+            conns = self.connections.copy()
+        
         to_remove = []
 
         for addr in conns:
@@ -189,20 +201,19 @@ class SocketServer(object):
             except ValueError:
                 to_remove.append(addr)
 
-        self.lock.acquire()
-        for addr in to_remove:
-            try:
-                conns[addr].close()
-            except BrokenPipeError:
-                pass
-            except ConnectionResetError:
-                pass
-            except ValueError:
-                pass
+        with self.lock:
+            for addr in to_remove:
+                try:
+                    conns[addr].close()
+                except BrokenPipeError:
+                    pass
+                except ConnectionResetError:
+                    pass
+                except ValueError:
+                    pass
 
-            del conns[addr]
-        self.lock.release()
-
+                del conns[addr]
+        
         return len(buf)
 
     def close(self):
