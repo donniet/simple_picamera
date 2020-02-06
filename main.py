@@ -2,12 +2,15 @@ import socket
 import time
 import logging
 import picamera
+import picamera.array
 import re
 import threading
 from threading import Condition
 import socketserver
 import io
+import numpy as np
 from http import server
+import requests
 
 # server_socket = socket.socket()
 # server_socket.bind(('0.0.0.0', 8000))
@@ -36,10 +39,82 @@ class StreamingOutput(object):
             # clients it's available
             self.buffer.truncate()
             with self.condition:
-                self.frame = self.buffer.getvalue()
-                self.condition.notify_all()
+                self.frame = self.buffer.getvalue()[:]
+            
+            self.condition.notify_all()
             self.buffer.seek(0)
+
         return self.buffer.write(buf)
+
+class DetectMotion(picamera.array.PiMotionAnalysis):
+    def __init__(self, camera, magnitude, threshold, notifier):
+        super(DetectMotion, self).__init__(camera, size=None)
+        self.total_motion = 0.
+        self.magnitude = magnitude
+        self.threshold = threshold
+        self.notifier = notifier
+
+    def analyze(self, a):
+        a = np.sqrt(
+            np.square(a['x'].astype(np.float)) +
+            np.square(a['y'].astype(np.float))
+            ).clip(0, 255).astype(np.uint8)
+        # If there're more than 10 vectors with a magnitude greater
+        # than 60, then say we've detected motion
+
+        self.total_motion = (a > self.magnitude).sum()
+
+        # print('total_motion: {}'.format(self.total_motion))
+
+        if self.total_motion > self.threshold:
+            print('Motion detected: {}'.format(self.total_motion))
+            if not self.notifier is None:
+                self.notifier.notify()
+
+class Notifier(object):
+    def __init__(self, url, data=None):
+        self.url = url
+        self.data = data
+
+        self.condition = Condition()
+        self.completed = False
+        self.thread = threading.Thread(target=self.notify_thread)
+        self.thread.start()
+
+    def notify_thread(self):
+        self.condition.acquire()
+
+        while not self.completed:
+            self.condition.wait()
+
+            if self.completed:
+                break
+
+            # no need to hold the lock while we make the request
+            self.condition.release()
+            try:
+                print('sending notification')
+                requests.post(self.url, data=self.data)
+            except Exception as e:
+                print('Exception when notifying: {}'.format(e))
+            finally:
+                self.condition.acquire()
+        
+        self.condition.release()
+
+    def notify(self):
+        with self.condition:
+            self.condition.notify_all()
+    
+    def stop(self):
+        with self.condition:
+            self.completed = True
+            self.condition.notify_all()
+
+        self.thread.join()
+                
+
+
 
 class MotionOutput(object):
     def __init__(self):
@@ -53,8 +128,9 @@ class MotionOutput(object):
         self.buffer.truncate()
 
         with self.condition:
-            self.frame = self.buffer.getvalue()
-            self.condition.notify_all()
+            self.frame = self.buffer.getvalue()[:]
+
+        self.condition.notify_all()
 
         return ret
 
@@ -96,25 +172,25 @@ class WebHandler(server.BaseHTTPRequestHandler):
                 logging.warning(
                     'Removed streaming client %s: %s',
                     self.client_address, str(e))
-        elif path == '/motion.bin':
-            self.send_response(200)
-            self.send_header('Age', 0)
-            self.send_header('Cache-Control', 'no-cache, private')
-            self.send_header('Pragma', 'no-cache')
-            self.send_header('Content-Type', 'binary/octet-stream')
+        # elif path == '/motion.bin':
+        #     self.send_response(200)
+        #     self.send_header('Age', 0)
+        #     self.send_header('Cache-Control', 'no-cache, private')
+        #     self.send_header('Pragma', 'no-cache')
+        #     self.send_header('Content-Type', 'binary/octet-stream')
 
-            try:
-                with self.server.motionOutput.condition:
-                    # no need to wait, just get the frame
-                    # self.server.motionOutput.condition.wait()
-                    frame = self.server.motionOutput.frame
+        #     try:
+        #         with self.server.motionOutput.condition:
+        #             # no need to wait, just get the frame
+        #             # self.server.motionOutput.condition.wait()
+        #             frame = self.server.motionOutput.frame
                 
-                self.send_header('Content-Length', len(frame))
-                self.end_headers()
+        #         self.send_header('Content-Length', len(frame))
+        #         self.end_headers()
 
-                self.wfile.write(frame)
-            except Exception as e:
-                logging.warning('Error getting motion %s', str(e))
+        #         self.wfile.write(frame)
+        #     except Exception as e:
+        #         logging.warning('Error getting motion %s', str(e))
 
         elif path == '/frame.jpg':
             self.send_response(200)
@@ -127,7 +203,7 @@ class WebHandler(server.BaseHTTPRequestHandler):
                 with self.server.output.condition:
                     # no need to wait, just get the frame
                     # self.server.output.condition.wait()
-                    frame = self.server.output.frame
+                    frame = bytes(self.server.output.frame)
                 
                 self.send_header('Content-Length', len(frame))
                 self.end_headers()
@@ -215,27 +291,42 @@ class WebServer(socketserver.ThreadingMixIn, server.HTTPServer):
     allow_reuse_address = True
     # daemon_threads = True
 
-    def __init__(self, output, motionOutput, *args, **kwargs):
+    def __init__(self, outputs, *args, **kwargs):
         super(WebServer, self).__init__(*args, **kwargs)
         self.output = output
-        self.motionOutput = motionOutput
+        # self.motionOutput = motionOutput
 
 # Accept a single connection and make a file-like object out of it
 # connection = server_socket.accept()[0].makefile('wb')
 
-camera = picamera.PiCamera()
+print('starting picamera')
+
+camera = picamera.PiCamera(resolution=(1640,1248), framerate=24)
 #camera.resolution = (1440, 1080)
-camera.resolution = (1640, 1248)
-camera.framerate = 24
+# camera.resolution = (1640, 1248)
+# camera.framerate = 24
+
+print('creating socket server')
 server = SocketServer('0.0.0.0', 8000)
+
+print('creating mjpeg outputer')
 output = StreamingOutput()
-motionOutput = MotionOutput()
-webServer = WebServer(output, motionOutput, ('', 8888), WebHandler)
+
+print('creating notifier')
+notifier = Notifier(url='http://mirror.local:9080/', data='"on"')
+# motionOutput = MotionOutput()
+detectMotion = DetectMotion(camera, magnitude=60, threshold=10, notifier=notifier)
+
+print('creating webserver')
+webServer = WebServer(output, ('', 8888), WebHandler)
     
 
 try:
+    print('starting mjpeg recorder')
     camera.start_recording(output, format='mjpeg', splitter_port=2, resize=(640,480))
-    camera.start_recording(server, format='h264', level='4.2', profile='high', intra_refresh='cyclic', inline_headers=True, sps_timing=True, motion_output=motionOutput )
+
+    print('starting h264 recorder')
+    camera.start_recording(server, format='h264', level='4.2', profile='high', intra_refresh='cyclic', inline_headers=True, sps_timing=True, motion_output=detectMotion)
     webServer.serve_forever()
 except KeyboardInterrupt:
     pass
@@ -243,6 +334,8 @@ except KeyboardInterrupt:
 camera.stop_recording()
 camera.stop_recording(splitter_port=2)
 server.close()
+notifier.stop()
+camera.close()
 webServer.shutdown()
 
 # camera.stop_recording()
