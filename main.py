@@ -65,7 +65,7 @@ class DetectMotion(picamera.array.PiMotionAnalysis):
 
         self.total_motion = (a > self.magnitude).sum()
 
-        # print('total_motion: {}'.format(self.total_motion, flush=True))
+        # print('total_motion: {}'.format(self.total_motion), flush=True)
 
         if self.total_motion > self.threshold:
             print('Motion detected: {}'.format(self.total_motion, flush=True))
@@ -361,8 +361,8 @@ if __name__ == "__main__":
     parser.add_argument("--video_port", default=8000, help="port to listen for h264 video frames")
     parser.add_argument("--macroblock_magnitude", default=60, help="macroblock motion vector minimum magnitude to flag as motion")
     parser.add_argument("--motion_threshold", default=10, help="number motion macroblocks to trigger full frame motion")
-    parser.add_argument("--width", default=1640, help="full frame width for motion analysis and h264")
-    parser.add_argument("--height", default=1440, help="full frame height for motion analysis and h264")
+    parser.add_argument("--width", default=1440, help="full frame width for motion analysis and h264")
+    parser.add_argument("--height", default=1080, help="full frame height for motion analysis and h264")
     parser.add_argument("--jpeg_width", default=640, help="frame width for JPEG and MJPEG")
     parser.add_argument("--jpeg_height", default=480, help="frame height for JPEG and MJPEG")
     parser.add_argument("--h264_level", default="4.2", help="h264 level for picamera library")
@@ -370,5 +370,6 @@ if __name__ == "__main__":
     parser.add_argument("--framerate", default=24, help="video framerate")
 
     args = parser.parse_args()
+    print(args)
     main(args)
 
