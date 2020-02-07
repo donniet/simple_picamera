@@ -11,6 +11,8 @@ import io
 import numpy as np
 from http import server
 import requests
+import time
+import argparse
 
 # server_socket = socket.socket()
 # server_socket.bind(('0.0.0.0', 8000))
@@ -40,8 +42,7 @@ class StreamingOutput(object):
             self.buffer.truncate()
             with self.condition:
                 self.frame = self.buffer.getvalue()[:]
-            
-            self.condition.notify_all()
+                self.condition.notify_all()
             self.buffer.seek(0)
 
         return self.buffer.write(buf)
@@ -64,10 +65,10 @@ class DetectMotion(picamera.array.PiMotionAnalysis):
 
         self.total_motion = (a > self.magnitude).sum()
 
-        # print('total_motion: {}'.format(self.total_motion))
+        # print('total_motion: {}'.format(self.total_motion, flush=True))
 
         if self.total_motion > self.threshold:
-            print('Motion detected: {}'.format(self.total_motion))
+            print('Motion detected: {}'.format(self.total_motion, flush=True))
             if not self.notifier is None:
                 self.notifier.notify()
 
@@ -80,6 +81,9 @@ class Notifier(object):
         self.completed = False
         self.thread = threading.Thread(target=self.notify_thread)
         self.thread.start()
+        self.timestamp = 0
+        self.interval = 60
+
 
     def notify_thread(self):
         self.condition.acquire()
@@ -89,14 +93,21 @@ class Notifier(object):
 
             if self.completed:
                 break
+            
+            n = time.time()
+            if n - self.timestamp < self.interval:
+                continue
+
+            self.timestamp = n
 
             # no need to hold the lock while we make the request
             self.condition.release()
+
             try:
-                print('sending notification')
+                print('sending notification', flush=True)
                 requests.post(self.url, data=self.data)
             except Exception as e:
-                print('Exception when notifying: {}'.format(e))
+                print('Exception when notifying: {}'.format(e), flush=True)
             finally:
                 self.condition.acquire()
         
@@ -129,8 +140,7 @@ class MotionOutput(object):
 
         with self.condition:
             self.frame = self.buffer.getvalue()[:]
-
-        self.condition.notify_all()
+            self.condition.notify_all()
 
         return ret
 
@@ -229,14 +239,14 @@ class SocketServer(object):
         self.accepter.start()
 
     def _accepter(self):
-        print('accepter started')
+        print('accepter started', flush=True)
         while True:
             try:
                 (conn, addr) = self.sock.accept()
             except OSError:
                 break
 
-            print('accepted: {}'.format(addr))
+            print('accepted: {}'.format(addr), flush=True)
 
             self.lock.acquire()
             self.connections[addr] = conn.makefile('wb')
@@ -284,14 +294,14 @@ class SocketServer(object):
     def close(self):
         self.sock.shutdown(socket.SHUT_RDWR)
         self.sock.close()
-        print('socket closed, joining accepter thread')
+        print('socket closed, joining accepter thread', flush=True)
         self.accepter.join()
         
 class WebServer(socketserver.ThreadingMixIn, server.HTTPServer):
     allow_reuse_address = True
     # daemon_threads = True
 
-    def __init__(self, outputs, *args, **kwargs):
+    def __init__(self, output, *args, **kwargs):
         super(WebServer, self).__init__(*args, **kwargs)
         self.output = output
         # self.motionOutput = motionOutput
@@ -299,44 +309,66 @@ class WebServer(socketserver.ThreadingMixIn, server.HTTPServer):
 # Accept a single connection and make a file-like object out of it
 # connection = server_socket.accept()[0].makefile('wb')
 
-print('starting picamera')
+def main(args):
+    print('starting picamera', flush=True)
 
-camera = picamera.PiCamera(resolution=(1640,1248), framerate=24)
-#camera.resolution = (1440, 1080)
-# camera.resolution = (1640, 1248)
-# camera.framerate = 24
+    camera = picamera.PiCamera(resolution=(args.width,args.height), framerate=args.framerate)
+    #camera.resolution = (1440, 1080)
+    # camera.resolution = (1640, 1248)
+    # camera.framerate = 24
 
-print('creating socket server')
-server = SocketServer('0.0.0.0', 8000)
+    print('creating socket server', flush=True)
+    server = SocketServer('0.0.0.0', args.video_port)
 
-print('creating mjpeg outputer')
-output = StreamingOutput()
+    print('creating mjpeg outputer', flush=True)
+    output = StreamingOutput()
 
-print('creating notifier')
-notifier = Notifier(url='http://mirror.local:9080/', data='"on"')
-# motionOutput = MotionOutput()
-detectMotion = DetectMotion(camera, magnitude=60, threshold=10, notifier=notifier)
+    print('creating notifier', flush=True)
+    notifier = Notifier(url=args.notify, data=args.notify_data)
+    # motionOutput = MotionOutput()
+    detectMotion = DetectMotion(camera, magnitude=args.macroblock_magnitude, threshold=args.motion_threshold, notifier=notifier)
 
-print('creating webserver')
-webServer = WebServer(output, ('', 8888), WebHandler)
-    
+    print('creating webserver', flush=True)
+    webServer = WebServer(output, ('', args.http_port), WebHandler)
+        
 
-try:
-    print('starting mjpeg recorder')
-    camera.start_recording(output, format='mjpeg', splitter_port=2, resize=(640,480))
+    try:
+        print('starting mjpeg recorder', flush=True)
+        camera.start_recording(output, format='mjpeg', splitter_port=2, resize=(args.jpeg_width,args.jpeg_height))
 
-    print('starting h264 recorder')
-    camera.start_recording(server, format='h264', level='4.2', profile='high', intra_refresh='cyclic', inline_headers=True, sps_timing=True, motion_output=detectMotion)
-    webServer.serve_forever()
-except KeyboardInterrupt:
-    pass
+        print('starting h264 recorder', flush=True)
+        camera.start_recording(server, format='h264', level=args.h264_level, profile=args.h264_profile, intra_refresh='cyclic', inline_headers=True, sps_timing=True, motion_output=detectMotion)
+        webServer.serve_forever()
+    except KeyboardInterrupt:
+        pass
 
-camera.stop_recording()
-camera.stop_recording(splitter_port=2)
-server.close()
-notifier.stop()
-camera.close()
-webServer.shutdown()
+    camera.stop_recording()
+    camera.stop_recording(splitter_port=2)
+    server.close()
+    notifier.stop()
+    camera.close()
+    webServer.shutdown()
 
-# camera.stop_recording()
-# server.close()
+    # camera.stop_recording()
+    # server.close()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="picamera wrapper for JPEG, MJPEG, H264 and motion analysis")
+    parser.add_argument("--notify", default="http://mirror.local:9080/", help="url to post a notification to")
+    parser.add_argument("--notify_data", default='"on"', help="data to post to notification url")
+    parser.add_argument("--notify_interval", default=60, help="throttle (sec) between notifications")
+    parser.add_argument("--http_port", default=8888, help="port to serve http for frames and mjpeg")
+    parser.add_argument("--video_port", default=8000, help="port to listen for h264 video frames")
+    parser.add_argument("--macroblock_magnitude", default=60, help="macroblock motion vector minimum magnitude to flag as motion")
+    parser.add_argument("--motion_threshold", default=10, help="number motion macroblocks to trigger full frame motion")
+    parser.add_argument("--width", default=1640, help="full frame width for motion analysis and h264")
+    parser.add_argument("--height", default=1440, help="full frame height for motion analysis and h264")
+    parser.add_argument("--jpeg_width", default=640, help="frame width for JPEG and MJPEG")
+    parser.add_argument("--jpeg_height", default=480, help="frame height for JPEG and MJPEG")
+    parser.add_argument("--h264_level", default="4.2", help="h264 level for picamera library")
+    parser.add_argument("--h264_profile", default="high", help="h264 profile for picamera library")
+    parser.add_argument("--framerate", default=24, help="video framerate")
+
+    args = parser.parse_args()
+    main(args)
+
