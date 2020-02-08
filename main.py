@@ -69,7 +69,7 @@ class DetectMotion(picamera.array.PiMotionAnalysis):
         # print('total_motion: {}'.format(self.total_motion), flush=True)
 
         if self.total_motion > self.threshold:
-            print('Motion detected: {}'.format(self.total_motion, flush=True))
+            print('Motion detected: {}'.format(self.total_motion), flush=True)
             if not self.notifier is None:
                 self.notifier.notify()
 
