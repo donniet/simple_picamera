@@ -13,6 +13,7 @@ from http import server
 import requests
 import time
 import argparse
+import queue
 
 # server_socket = socket.socket()
 # server_socket.bind(('0.0.0.0', 8000))
@@ -226,17 +227,80 @@ class WebHandler(server.BaseHTTPRequestHandler):
             self.send_error(404)
             self.end_headers()
 
-class SocketServer(object):
-    def __init__(self, addr, port):
+class VideoConnection(object):
+    def __init__(self, addr, conn):
+        self.addr = addr
+        self.conn = conn
+        self.error = False
+
+    def write(self, buf):
+        try:
+            self.conn.write(buf)
+        except Exception as e:
+            print('error writing to {}: {}'.format(self.addr, e))
+            self.error = True
+            return 0
+        
+        return len(buf)
+
+
+class VideoServer(object):
+    def __init__(self, addr, port, pool_size=10):
         self.sock = socket.socket()
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind((addr, port))
         self.sock.listen(0)
+
+        # self.lock = threading.Lock()
         self.connections = dict()
-        self.lock = threading.Lock()
+        self.queue = queue.Queue()
+
+        self.pool_size = pool_size
+        self.threads = []
+        for _ in range(self.pool_size):
+            t = threading.Thread(target=self._writer)
+            t.start()
+            self.threads.append(t)
 
         self.accepter = threading.Thread(target=self._accepter)
         self.accepter.start()
+    
+    def close(self):
+        self.sock.shutdown(socket.SHUT_RDWR)
+        self.sock.close()
+        print('socket closed, joining accepter thread', flush=True)
+        self.accepter.join()
+
+        for t in self.threads:
+            t.join()
+
+    def _writer(self):
+        print('writer started.', flush=True)
+        while True:
+            # print('waiting for item in worker...', flush=True)
+            item = self.queue.get()
+
+            if item['close']:
+                break
+
+            # print('got item from queue: {}'.format(item['addr']), flush=True)
+
+            did_error = False
+            try:
+                item['conn'].write(item['buf'])
+            except Exception as e:
+                print('error writing to {}: {}'.format(item['addr'], e))
+                did_error = True
+            
+            if did_error:
+                item['conn'].close()
+                # with self.lock:
+                del self.connections[item['addr']]
+
+            self.queue.task_done()
+
+            # print('queue size: {}'.format(self.queue.qsize()), flush=True)
+
 
     def _accepter(self):
         print('accepter started', flush=True)
@@ -248,54 +312,36 @@ class SocketServer(object):
 
             print('accepted: {}'.format(addr), flush=True)
 
-            self.lock.acquire()
-            self.connections[addr] = conn.makefile('wb')
-            self.lock.release()
+            # with self.lock:
+            self.connections['{}:{}'.format(*addr)] = conn.makefile('wb')
+
+            # print('connection added to list of connections', flush=True)
+            
+        for _ in range(self.pool_size):
+            self.queue.put({'close': True})
         
-        self.lock.acquire()
-        for addr in self.connections:
-            self.connections[addr].close()
-        self.lock.release()
+
 
     def write(self, buf):
-        self.lock.acquire()
+        # print('write called: {}'.format(len(buf)), flush=True)
+        # print('locked: {}'.format(self.lock.locked()), flush=True)
+        conns = dict()
+
+        # with self.lock:
+            # print('acquired lock', flush=True)
         conns = self.connections.copy()
-        self.lock.release()
 
-        to_remove = []
+        # print('connections: {}'.format(len(conns)), flush=True)
+        
+        for a in conns:
+            # print('adding data to queue for {}'.format(a), flush=True)
 
-        for addr in conns:
-            c = conns[addr]
-            try:
-                c.write(buf)
-            except BrokenPipeError:
-                to_remove.append(addr)
-            except ConnectionResetError:
-                to_remove.append(addr)
-            except ValueError:
-                to_remove.append(addr)
+            self.queue.put({'close': False, 'buf': buf, 'addr': a, 'conn': conns[a]})
 
-        self.lock.acquire()
-        for addr in to_remove:
-            try:
-                conns[addr].close()
-            except BrokenPipeError:
-                pass
-            except ConnectionResetError:
-                pass
-            except ValueError:
-                pass
-
-            del conns[addr]
-        self.lock.release()
+        # print('waiting to join queue', flush=True)
+        self.queue.join()
 
         return len(buf)
-
-    def close(self):
-        self.sock.shutdown(socket.SHUT_RDWR)
-        self.sock.close()
-        print('socket closed, joining accepter thread', flush=True)
-        self.accepter.join()
         
 class WebServer(socketserver.ThreadingMixIn, server.HTTPServer):
     allow_reuse_address = True
@@ -318,7 +364,8 @@ def main(args):
     # camera.framerate = 24
 
     print('creating socket server', flush=True)
-    server = SocketServer('0.0.0.0', args.video_port)
+    # server = SocketServer('0.0.0.0', args.video_port)
+    server = VideoServer('0.0.0.0', args.video_port)
 
     print('creating mjpeg outputer', flush=True)
     output = StreamingOutput()
@@ -338,6 +385,8 @@ def main(args):
 
         print('starting h264 recorder', flush=True)
         camera.start_recording(server, format='h264', level=args.h264_level, profile=args.h264_profile, intra_refresh='cyclic', inline_headers=True, sps_timing=True, motion_output=detectMotion)
+
+        print('starting webserver', flush=True)
         webServer.serve_forever()
     except KeyboardInterrupt:
         pass
