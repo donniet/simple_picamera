@@ -14,10 +14,17 @@ import requests
 import time
 import argparse
 import queue
+import redis
+import redistimeseries.client
+from datetime import datetime, timedelta
+import dateutil.tz
+
 
 # server_socket = socket.socket()
 # server_socket.bind(('0.0.0.0', 8000))
 # server_socket.listen(0)
+
+EPOCH = datetime(1970, 1, 1, 0, 0, 0, tzinfo=dateutil.tz.tzutc())
 
 index_HTML = """\
 <html>
@@ -49,12 +56,14 @@ class StreamingOutput(object):
         return self.buffer.write(buf)
 
 class DetectMotion(picamera.array.PiMotionAnalysis):
-    def __init__(self, camera, magnitude, threshold, notifier):
+    def __init__(self, camera, magnitude, threshold, notifier, timeseries, timeseries_key):
         super(DetectMotion, self).__init__(camera, size=None)
         self.total_motion = 0.
         self.magnitude = magnitude
         self.threshold = threshold
         self.notifier = notifier
+        self.timeseries = timeseries
+        self.timeseries_key = timeseries_key
 
     def analyze(self, a):
         a = np.sqrt(
@@ -65,6 +74,8 @@ class DetectMotion(picamera.array.PiMotionAnalysis):
         # than 60, then say we've detected motion
 
         self.total_motion = (a > self.magnitude).sum()
+        timestamp = int((datetime.now(tz=dateutil.tz.tzutc()) - EPOCH) / timedelta(milliseconds=1))
+        self.timeseries.add(self.timeseries_key, timestamp, float(self.total_motion))
 
         # print('total_motion: {}'.format(self.total_motion), flush=True)
 
@@ -358,6 +369,22 @@ class WebServer(socketserver.ThreadingMixIn, server.HTTPServer):
 def main(args):
     print('starting picamera', flush=True)
 
+    red = redistimeseries.client.Client(host=args.redis_host, port=args.redis_port)
+    motion_key = 'motion:{}:{}x{}@{}:{}'.format(args.redis_prefix, args.width, args.height, args.framerate, args.macroblock_magnitude)
+    try:
+        red.create(motion_key, retention_msecs=86400000, labels={
+            'width': args.width,
+            'height': args.height,
+            'framerate': args.framerate,
+            'macroblock_magnitude': args.macroblock_magnitude,
+            'motion_threshold': args.motion_threshold
+        })
+    except redis.exceptions.ResponseError:
+        pass
+    
+
+
+
     camera = picamera.PiCamera(resolution=(args.width,args.height), framerate=args.framerate)
     #camera.resolution = (1440, 1080)
     # camera.resolution = (1640, 1248)
@@ -373,7 +400,7 @@ def main(args):
     print('creating notifier', flush=True)
     notifier = Notifier(url=args.notify, data=args.notify_data)
     # motionOutput = MotionOutput()
-    detectMotion = DetectMotion(camera, magnitude=args.macroblock_magnitude, threshold=args.motion_threshold, notifier=notifier)
+    detectMotion = DetectMotion(camera, magnitude=args.macroblock_magnitude, threshold=args.motion_threshold, notifier=notifier, timeseries=red, timeseries_key=motion_key)
 
     print('creating webserver', flush=True)
     webServer = WebServer(output, ('', args.http_port), WebHandler)
@@ -417,6 +444,9 @@ if __name__ == "__main__":
     parser.add_argument("--h264_level", default="4.2", help="h264 level for picamera library")
     parser.add_argument("--h264_profile", default="high", help="h264 profile for picamera library")
     parser.add_argument("--framerate", default=24, help="video framerate")
+    parser.add_argument("--redis_host", default="192.168.1.45", help="redis timeseries host")
+    parser.add_argument("--redis_port", default="6379", help="redis timeseries port")
+    parser.add_argument('--redis_prefix', default="picamera", help="redis key prefix")
 
     args = parser.parse_args()
     print(args)
