@@ -182,8 +182,7 @@ class WebHandler(server.BaseHTTPRequestHandler):
             try:
                 while True:
                     with self.server.output.condition:
-                        self.server.output.condition.wait()
-                        frame = self.server.output.frame
+                        frame = self.server.output.frame[:]
                     self.wfile.write(b'--FRAME\r\n')
                     self.send_header('Content-Type', 'image/jpeg')
                     self.send_header('Content-Length', len(frame))
@@ -225,7 +224,7 @@ class WebHandler(server.BaseHTTPRequestHandler):
                 with self.server.output.condition:
                     # no need to wait, just get the frame
                     # self.server.output.condition.wait()
-                    frame = bytes(self.server.output.frame)
+                    frame = self.server.output.frame[:]
                 
                 self.send_header('Content-Length', len(frame))
                 self.end_headers()
