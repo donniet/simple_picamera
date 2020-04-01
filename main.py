@@ -14,10 +14,22 @@ import requests
 import time
 import argparse
 import queue
-import redis
-import redistimeseries.client
 from datetime import datetime, timedelta
 import dateutil.tz
+import socket
+
+from prometheus_client import Summary, Counter, Gauge, MetricsHandler, Info
+
+TOTAL_MOTION = Summary('picamera_motion', 'sum of motion vectors above threshold')
+JPEG_FRAME_SEND_TIME = Summary('picamera_jpeg_frame_send_seconds', 'time to send a JPEG frame')
+JPEG_FRAME_TIME = Summary('picamera_jpeg_frame_seconds', 'time between frames')
+CLIENTS = Summary('picamera_clients', 'number of connected clients')
+JPEG_BYTES_SENT = Summary('picamera_jpeg_send_bytes', 'bytes of jpeg data sent')
+H264_BYTES_SENT = Summary('picamera_h264_send_bytes', 'bytes of h264 data sent')
+JPEG_CLIENTS = Gauge('picamera_jpeg_clients', 'number of concurrent jpeg clients')
+INFO = Info('picamera', 'information about this picamera instance')
+
+
 
 
 # server_socket = socket.socket()
@@ -42,6 +54,7 @@ class StreamingOutput(object):
         self.frame = None
         self.buffer = io.BytesIO()
         self.condition = Condition()
+        self.last = datetime.now()
 
     def write(self, buf):
         if buf.startswith(b'\xff\xd8'):
@@ -53,17 +66,19 @@ class StreamingOutput(object):
                 self.condition.notify_all()
             self.buffer.seek(0)
 
+            t1 = datetime.now()
+            JPEG_FRAME_TIME.observe((t1 - self.last).total_seconds())
+            self.last = t1
+
         return self.buffer.write(buf)
 
 class DetectMotion(picamera.array.PiMotionAnalysis):
-    def __init__(self, camera, magnitude, threshold, notifier, timeseries, timeseries_key):
+    def __init__(self, camera, magnitude, threshold, notifier):
         super(DetectMotion, self).__init__(camera, size=None)
         self.total_motion = 0.
         self.magnitude = magnitude
         self.threshold = threshold
         self.notifier = notifier
-        self.timeseries = timeseries
-        self.timeseries_key = timeseries_key
 
     def analyze(self, a):
         a = np.sqrt(
@@ -74,8 +89,7 @@ class DetectMotion(picamera.array.PiMotionAnalysis):
         # than 60, then say we've detected motion
 
         self.total_motion = (a > self.magnitude).sum()
-        timestamp = int((datetime.now(tz=dateutil.tz.tzutc()) - EPOCH) / timedelta(milliseconds=1))
-        self.timeseries.add(self.timeseries_key, timestamp, float(self.total_motion))
+        TOTAL_MOTION.observe(self.total_motion)
 
         # print('total_motion: {}'.format(self.total_motion), flush=True)
 
@@ -156,7 +170,7 @@ class MotionOutput(object):
 
         return ret
 
-class WebHandler(server.BaseHTTPRequestHandler):
+class WebHandler(MetricsHandler):
     def log_message(self, *args, **kwargs):
         pass
 
@@ -172,7 +186,10 @@ class WebHandler(server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', len(content))
             self.end_headers()
             self.wfile.write(content)
+        if path == '/metrics':
+            return super(WebHandler, self).do_GET()
         elif path == '/video.jpg':
+            JPEG_CLIENTS.inc()
             self.send_response(200)
             self.send_header('Age', 0)
             self.send_header('Cache-Control', 'no-cache, private')
@@ -181,6 +198,8 @@ class WebHandler(server.BaseHTTPRequestHandler):
             self.end_headers()
             try:
                 while True:
+                    t1 = datetime.now()
+
                     with self.server.output.condition:
                         frame = self.server.output.frame[:]
                     self.wfile.write(b'--FRAME\r\n')
@@ -189,10 +208,19 @@ class WebHandler(server.BaseHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(frame)
                     self.wfile.write(b'\r\n')
+
+                    JPEG_BYTES_SENT.observe(len(frame))
+
+                    t2 = datetime.now()
+
+                    JPEG_FRAME_SEND_TIME.observe((t2 - t1).total_seconds())
+
             except Exception as e:
                 logging.warning(
                     'Removed streaming client %s: %s',
                     self.client_address, str(e))
+            finally:
+                JPEG_CLIENTS.dec()
         # elif path == '/motion.bin':
         #     self.send_response(200)
         #     self.send_header('Age', 0)
@@ -214,6 +242,9 @@ class WebHandler(server.BaseHTTPRequestHandler):
         #         logging.warning('Error getting motion %s', str(e))
 
         elif path == '/frame.jpg':
+
+            t1 = datetime.now()
+
             self.send_response(200)
             self.send_header('Age', 0)
             self.send_header('Cache-Control', 'no-cache, private')
@@ -230,8 +261,14 @@ class WebHandler(server.BaseHTTPRequestHandler):
                 self.end_headers()
 
                 self.wfile.write(frame)
+
+                JPEG_BYTES_SENT.observe(len(frame))
             except Exception as e:
                 logging.warning('Error getting frame %s', str(e))
+
+            t2 = datetime.now()
+
+            JPEG_FRAME_SEND_TIME.observe((t2-t1).total_seconds())
 
         else:
             self.send_error(404)
@@ -246,6 +283,7 @@ class VideoConnection(object):
     def write(self, buf):
         try:
             self.conn.write(buf)
+            H264_BYTES_SENT.observe(len(buf))
         except Exception as e:
             print('error writing to {}: {}'.format(self.addr, e))
             self.error = True
@@ -274,6 +312,7 @@ class VideoServer(object):
 
         self.accepter = threading.Thread(target=self._accepter)
         self.accepter.start()
+        CLIENTS.observe(0)
     
     def close(self):
         self.sock.shutdown(socket.SHUT_RDWR)
@@ -284,20 +323,23 @@ class VideoServer(object):
         for t in self.threads:
             t.join()
 
+        CLIENTS.observe(0)
+
     def _writer(self):
         print('writer started.', flush=True)
         while True:
             # print('waiting for item in worker...', flush=True)
             item = self.queue.get()
 
+            did_error = False
+
             if item['close']:
                 break
 
             # print('got item from queue: {}'.format(item['addr']), flush=True)
-
-            did_error = False
+            l = 0
             try:
-                item['conn'].write(item['buf'])
+                l = item['conn'].write(item['buf'])
             except Exception as e:
                 print('error writing to {}: {}'.format(item['addr'], e))
                 did_error = True
@@ -306,6 +348,9 @@ class VideoServer(object):
                 item['conn'].close()
                 # with self.lock:
                 del self.connections[item['addr']]
+                CLIENTS.observe(len(self.connections))
+            else:
+                H264_BYTES_SENT.observe(l)
 
             self.queue.task_done()
 
@@ -322,8 +367,11 @@ class VideoServer(object):
 
             print('accepted: {}'.format(addr), flush=True)
 
+
             # with self.lock:
             self.connections['{}:{}'.format(*addr)] = conn.makefile('wb')
+
+            CLIENTS.observe(len(self.connections))
 
             # print('connection added to list of connections', flush=True)
             
@@ -368,20 +416,7 @@ class WebServer(socketserver.ThreadingMixIn, server.HTTPServer):
 def main(args):
     print('starting picamera', flush=True)
 
-    red = redistimeseries.client.Client(host=args.redis_host, port=args.redis_port)
-    motion_key = 'motion:{}:{}x{}@{}:{}'.format(args.redis_prefix, args.width, args.height, args.framerate, args.macroblock_magnitude)
-    try:
-        red.create(motion_key, retention_msecs=86400000, labels={
-            'width': args.width,
-            'height': args.height,
-            'framerate': args.framerate,
-            'macroblock_magnitude': args.macroblock_magnitude,
-            'motion_threshold': args.motion_threshold
-        })
-    except redis.exceptions.ResponseError:
-        pass
-    
-
+    INFO.info({'host': socket.gethostname(), 'version':'0.1.0'})
 
 
     camera = picamera.PiCamera(resolution=(args.width,args.height), framerate=args.framerate)
@@ -396,14 +431,17 @@ def main(args):
     print('creating mjpeg outputer', flush=True)
     output = StreamingOutput()
 
-    print('creating notifier', flush=True)
-    notifier = Notifier(url=args.notify, data=args.notify_data)
-    # motionOutput = MotionOutput()
-    detectMotion = DetectMotion(camera, magnitude=args.macroblock_magnitude, threshold=args.motion_threshold, notifier=notifier, timeseries=red, timeseries_key=motion_key)
+    if args.notify != "":
+        print('creating notifier', flush=True)
+        notifier = Notifier(url=args.notify, data=args.notify_data)
+        # motionOutput = MotionOutput()
+    else:
+        notifier = None
+
+    detectMotion = DetectMotion(camera, magnitude=args.macroblock_magnitude, threshold=args.motion_threshold, notifier=notifier)    
 
     print('creating webserver', flush=True)
     webServer = WebServer(output, ('', args.http_port), WebHandler)
-        
 
     try:
         print('starting mjpeg recorder', flush=True)
@@ -438,14 +476,11 @@ if __name__ == "__main__":
     parser.add_argument("--motion_threshold", default=10, help="number motion macroblocks to trigger full frame motion")
     parser.add_argument("--width", default=1440, help="full frame width for motion analysis and h264")
     parser.add_argument("--height", default=1080, help="full frame height for motion analysis and h264")
-    parser.add_argument("--jpeg_width", default=640, help="frame width for JPEG and MJPEG")
-    parser.add_argument("--jpeg_height", default=480, help="frame height for JPEG and MJPEG")
+    parser.add_argument("--jpeg_width", default=640, help="frame width for JPEG and MJPEG", type=int)
+    parser.add_argument("--jpeg_height", default=480, help="frame height for JPEG and MJPEG", type=int)
     parser.add_argument("--h264_level", default="4.2", help="h264 level for picamera library")
     parser.add_argument("--h264_profile", default="high", help="h264 profile for picamera library")
-    parser.add_argument("--framerate", default=24, help="video framerate")
-    parser.add_argument("--redis_host", default="192.168.1.45", help="redis timeseries host")
-    parser.add_argument("--redis_port", default="6379", help="redis timeseries port")
-    parser.add_argument('--redis_prefix', default="picamera", help="redis key prefix")
+    parser.add_argument("--framerate", default=24, help="video framerate", type=int)
 
     args = parser.parse_args()
     print(args)
