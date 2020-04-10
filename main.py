@@ -345,7 +345,11 @@ class VideoServer(object):
                 did_error = True
             
             if did_error:
-                item['conn'].close()
+                try:
+                    item['conn'].close()
+                except Exception:
+                    pass
+
                 # with self.lock:
                 del self.connections[item['addr']]
                 CLIENTS.observe(len(self.connections))
