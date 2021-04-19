@@ -130,10 +130,10 @@ class Notifier(object):
             self.condition.release()
 
             try:
-                print('sending notification', flush=True)
+                logging.info('sending notification')
                 requests.post(self.url, data=self.data)
             except Exception as e:
-                print('Exception when notifying: {}'.format(e), flush=True)
+                logging.error('Exception when notifying: {}'.format(e))
             finally:
                 self.condition.acquire()
         
@@ -220,10 +220,29 @@ class WebHandler(MetricsHandler):
 
             except Exception as e:
                 logging.warning(
-                    'Removed MJPEG streaming client %s: %s',
+                    'Removed streaming client %s: %s',
                     self.client_address, str(e))
             finally:
                 JPEG_CLIENTS.dec()
+        # elif path == '/motion.bin':
+        #     self.send_response(200)
+        #     self.send_header('Age', 0)
+        #     self.send_header('Cache-Control', 'no-cache, private')
+        #     self.send_header('Pragma', 'no-cache')
+        #     self.send_header('Content-Type', 'binary/octet-stream')
+
+        #     try:
+        #         with self.server.motionOutput.condition:
+        #             # no need to wait, just get the frame
+        #             # self.server.motionOutput.condition.wait()
+        #             frame = self.server.motionOutput.frame
+                
+        #         self.send_header('Content-Length', len(frame))
+        #         self.end_headers()
+
+        #         self.wfile.write(frame)
+        #     except Exception as e:
+        #         logging.warning('Error getting motion %s', str(e))
 
         elif path == '/frame.jpg':
 
@@ -269,7 +288,7 @@ class VideoConnection(object):
             self.conn.write(buf)
             H264_BYTES_SENT.observe(len(buf))
         except Exception as e:
-            print('error writing to {}: {}'.format(self.addr, e))
+            logging.warning('error writing to {}: {}'.format(self.addr, e))
             self.error = True
             return 0
         
@@ -301,7 +320,7 @@ class VideoServer(object):
     def close(self):
         self.sock.shutdown(socket.SHUT_RDWR)
         self.sock.close()
-        print('socket closed, joining accepter thread', flush=True)
+        logging.warning('socket closed, joining accepter thread')
         self.accepter.join()
 
         for t in self.threads:
@@ -310,7 +329,7 @@ class VideoServer(object):
         CLIENTS.observe(0)
 
     def _writer(self):
-        print('writer started.', flush=True)
+        logging.info('writer started.')
         while True:
             # print('waiting for item in worker...', flush=True)
             item = self.queue.get()
@@ -325,7 +344,7 @@ class VideoServer(object):
             try:
                 l = item['conn'].write(item['buf'])
             except Exception as e:
-                print('error writing to {}: {}'.format(item['addr'], e))
+                logging.error('error writing to {}: {}'.format(item['addr'], e))
                 did_error = True
             
             if did_error:
@@ -346,14 +365,14 @@ class VideoServer(object):
 
 
     def _accepter(self):
-        print('accepter started', flush=True)
+        logging.info('accepter started')
         while True:
             try:
                 (conn, addr) = self.sock.accept()
             except OSError:
                 break
 
-            print('accepted: {}'.format(addr), flush=True)
+            logging.info('accepted: {}'.format(addr))
 
 
             # with self.lock:
@@ -402,7 +421,7 @@ class WebServer(socketserver.ThreadingMixIn, server.HTTPServer):
 # connection = server_socket.accept()[0].makefile('wb')
 
 def main(args):
-    print('starting picamera', flush=True)
+    logging.info('starting picamera')
 
     INFO.info({'host': socket.gethostname(), 'version':'0.1.0'})
 
@@ -412,15 +431,15 @@ def main(args):
     # camera.resolution = (1640, 1248)
     # camera.framerate = 24
 
-    print('creating socket server', flush=True)
+    logging.info('creating socket server')
     # server = SocketServer('0.0.0.0', args.video_port)
     server = VideoServer('0.0.0.0', args.video_port)
 
-    print('creating mjpeg outputer', flush=True)
+    logging.info('creating mjpeg outputer')
     output = StreamingOutput()
 
     if args.notify != "":
-        print('creating notifier', flush=True)
+        logging.info('creating notifier')
         notifier = Notifier(url=args.notify, data=args.notify_data)
         # motionOutput = MotionOutput()
     else:
@@ -428,17 +447,17 @@ def main(args):
 
     detectMotion = DetectMotion(camera, magnitude=args.macroblock_magnitude, threshold=args.motion_threshold, notifier=notifier)    
 
-    print('creating webserver', flush=True)
+    logging.info('creating webserver')
     webServer = WebServer(output, ('', args.http_port), WebHandler)
 
     try:
-        print('starting mjpeg recorder', flush=True)
+        logging.info('starting mjpeg recorder')
         camera.start_recording(output, format='mjpeg', splitter_port=2, resize=(args.jpeg_width,args.jpeg_height))
 
-        print('starting h264 recorder', flush=True)
+        logging.info('starting h264 recorder')
         camera.start_recording(server, format='h264', level=args.h264_level, profile=args.h264_profile, intra_refresh='cyclic', inline_headers=True, sps_timing=True, motion_output=detectMotion)
 
-        print('starting webserver', flush=True)
+        logging.info('starting webserver')
         webServer.serve_forever()
     except KeyboardInterrupt:
         pass
@@ -471,6 +490,6 @@ if __name__ == "__main__":
     parser.add_argument("--framerate", default=24, help="video framerate", type=int)
 
     args = parser.parse_args()
-    print(args)
+    logging.info(args)
     main(args)
 
