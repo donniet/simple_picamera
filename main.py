@@ -94,7 +94,7 @@ class DetectMotion(picamera.array.PiMotionAnalysis):
         # print('total_motion: {}'.format(self.total_motion), flush=True)
 
         if self.total_motion > self.threshold:
-            # print('Motion detected: {}'.format(self.total_motion), flush=True)
+            #logging.info('Motion detected: {}'.format(self.total_motion))
             if not self.notifier is None:
                 self.notifier.notify()
 
@@ -134,6 +134,7 @@ class Notifier(object):
                 requests.post(self.url, data=self.data)
             except Exception as e:
                 logging.error('Exception when notifying: {}'.format(e))
+
             finally:
                 self.condition.acquire()
         
@@ -171,7 +172,9 @@ class MotionOutput(object):
         return ret
 
 class WebHandler(MetricsHandler):
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
+        super(WebHandler, self).__init__(*args, **kwargs)
+        
         self.exp = re.compile('^([^\?]+)\??.*$')
 
     def log_message(self, *args, **kwargs):
