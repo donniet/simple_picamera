@@ -94,7 +94,7 @@ class DetectMotion(picamera.array.PiMotionAnalysis):
         # print('total_motion: {}'.format(self.total_motion), flush=True)
 
         if self.total_motion > self.threshold:
-            print('Motion detected: {}'.format(self.total_motion), flush=True)
+            # print('Motion detected: {}'.format(self.total_motion), flush=True)
             if not self.notifier is None:
                 self.notifier.notify()
 
@@ -171,11 +171,14 @@ class MotionOutput(object):
         return ret
 
 class WebHandler(MetricsHandler):
+    def __init__(self):
+        self.exp = re.compile('^([^\?]+)\??.*$')
+
     def log_message(self, *args, **kwargs):
         pass
 
     def do_GET(self):
-        m = re.search('^([^\?]+)\??.*$', self.path)
+        m = self.exp.search(self.path)
 
         path = m.group(1)
 
@@ -217,29 +220,10 @@ class WebHandler(MetricsHandler):
 
             except Exception as e:
                 logging.warning(
-                    'Removed streaming client %s: %s',
+                    'Removed MJPEG streaming client %s: %s',
                     self.client_address, str(e))
             finally:
                 JPEG_CLIENTS.dec()
-        # elif path == '/motion.bin':
-        #     self.send_response(200)
-        #     self.send_header('Age', 0)
-        #     self.send_header('Cache-Control', 'no-cache, private')
-        #     self.send_header('Pragma', 'no-cache')
-        #     self.send_header('Content-Type', 'binary/octet-stream')
-
-        #     try:
-        #         with self.server.motionOutput.condition:
-        #             # no need to wait, just get the frame
-        #             # self.server.motionOutput.condition.wait()
-        #             frame = self.server.motionOutput.frame
-                
-        #         self.send_header('Content-Length', len(frame))
-        #         self.end_headers()
-
-        #         self.wfile.write(frame)
-        #     except Exception as e:
-        #         logging.warning('Error getting motion %s', str(e))
 
         elif path == '/frame.jpg':
 
