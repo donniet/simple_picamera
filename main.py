@@ -20,7 +20,7 @@ import socket
 
 from prometheus_client import Summary, Counter, Gauge, MetricsHandler, Info
 
-ENABLE_STATS = False
+ENABLE_STATS = True
 
 TOTAL_MOTION = Summary('picamera_motion', 'sum of motion vectors above threshold')
 JPEG_FRAME_SEND_TIME = Summary('picamera_jpeg_frame_send_seconds', 'time to send a JPEG frame')
@@ -52,12 +52,12 @@ index_HTML = """\
 """
 
 class StreamingOutput(object):
-    def __init__(self, disableStats = False):
+    def __init__(self):
         self.frame = None
         self.buffer = io.BytesIO()
         self.condition = Condition()
         self.last = datetime.now()
-        self.disableStats = disableStats
+
 
     def write(self, buf):
         if buf.startswith(b'\xff\xd8'):
@@ -77,13 +77,13 @@ class StreamingOutput(object):
         return self.buffer.write(buf)
 
 class DetectMotion(picamera.array.PiMotionAnalysis):
-    def __init__(self, camera, magnitude, threshold, notifier, disableStats = False):
+    def __init__(self, camera, magnitude, threshold, notifier):
         super(DetectMotion, self).__init__(camera, size=None)
         self.total_motion = 0.
         self.magnitude = magnitude
         self.threshold = threshold
         self.notifier = notifier
-        self.disableStats = disableStats
+
 
     def analyze(self, a):
         a = np.sqrt(
@@ -218,6 +218,8 @@ class WebHandler(MetricsHandler):
                     self.wfile.write(frame)
                     self.wfile.write(b'\r\n')
 
+                    time.sleep(1.0/12.)
+
 
                     if ENABLE_STATS:
                         JPEG_BYTES_SENT.observe(len(frame))
@@ -288,11 +290,11 @@ class WebHandler(MetricsHandler):
             self.end_headers()
 
 class VideoConnection(object):
-    def __init__(self, addr, conn, disableStats = False):
+    def __init__(self, addr, conn):
         self.addr = addr
         self.conn = conn
         self.error = False
-        self.disableStats = disableStats
+
 
     def write(self, buf):
         try:
