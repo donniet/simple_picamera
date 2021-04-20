@@ -20,6 +20,8 @@ import socket
 
 from prometheus_client import Summary, Counter, Gauge, MetricsHandler, Info
 
+ENABLE_STATS = False
+
 TOTAL_MOTION = Summary('picamera_motion', 'sum of motion vectors above threshold')
 JPEG_FRAME_SEND_TIME = Summary('picamera_jpeg_frame_send_seconds', 'time to send a JPEG frame')
 JPEG_FRAME_TIME = Summary('picamera_jpeg_frame_seconds', 'time between frames')
@@ -50,11 +52,12 @@ index_HTML = """\
 """
 
 class StreamingOutput(object):
-    def __init__(self):
+    def __init__(self, disableStats = False):
         self.frame = None
         self.buffer = io.BytesIO()
         self.condition = Condition()
         self.last = datetime.now()
+        self.disableStats = disableStats
 
     def write(self, buf):
         if buf.startswith(b'\xff\xd8'):
@@ -66,19 +69,21 @@ class StreamingOutput(object):
                 self.condition.notify_all()
             self.buffer.seek(0)
 
-            t1 = datetime.now()
-            JPEG_FRAME_TIME.observe((t1 - self.last).total_seconds())
-            self.last = t1
+            if ENABLE_STATS:
+                t1 = datetime.now()
+                JPEG_FRAME_TIME.observe((t1 - self.last).total_seconds())
+                self.last = t1
 
         return self.buffer.write(buf)
 
 class DetectMotion(picamera.array.PiMotionAnalysis):
-    def __init__(self, camera, magnitude, threshold, notifier):
+    def __init__(self, camera, magnitude, threshold, notifier, disableStats = False):
         super(DetectMotion, self).__init__(camera, size=None)
         self.total_motion = 0.
         self.magnitude = magnitude
         self.threshold = threshold
         self.notifier = notifier
+        self.disableStats = disableStats
 
     def analyze(self, a):
         a = np.sqrt(
@@ -89,7 +94,9 @@ class DetectMotion(picamera.array.PiMotionAnalysis):
         # than 60, then say we've detected motion
 
         self.total_motion = (a > self.magnitude).sum()
-        TOTAL_MOTION.observe(self.total_motion)
+
+        if ENABLE_STATS:
+            TOTAL_MOTION.observe(self.total_motion)
 
         # print('total_motion: {}'.format(self.total_motion), flush=True)
 
@@ -172,16 +179,11 @@ class MotionOutput(object):
         return ret
 
 class WebHandler(MetricsHandler):
-    def __init__(self, *args, **kwargs):
-        super(WebHandler, self).__init__(*args, **kwargs)
-        
-        self.exp = re.compile('^([^\?]+)\??.*$')
-
     def log_message(self, *args, **kwargs):
         pass
 
     def do_GET(self):
-        m = self.exp.search(self.path)
+        m = self.server.exp.search(self.path)
 
         path = m.group(1)
 
@@ -195,7 +197,8 @@ class WebHandler(MetricsHandler):
         if path == '/metrics':
             return super(WebHandler, self).do_GET()
         elif path == '/video.jpg':
-            JPEG_CLIENTS.inc()
+            if ENABLE_STATS:
+                JPEG_CLIENTS.inc()
             self.send_response(200)
             self.send_header('Age', 0)
             self.send_header('Cache-Control', 'no-cache, private')
@@ -215,18 +218,19 @@ class WebHandler(MetricsHandler):
                     self.wfile.write(frame)
                     self.wfile.write(b'\r\n')
 
-                    JPEG_BYTES_SENT.observe(len(frame))
 
-                    t2 = datetime.now()
-
-                    JPEG_FRAME_SEND_TIME.observe((t2 - t1).total_seconds())
+                    if ENABLE_STATS:
+                        JPEG_BYTES_SENT.observe(len(frame))
+                        t2 = datetime.now()
+                        JPEG_FRAME_SEND_TIME.observe((t2 - t1).total_seconds())
 
             except Exception as e:
                 logging.warning(
                     'Removed streaming client %s: %s',
                     self.client_address, str(e))
             finally:
-                JPEG_CLIENTS.dec()
+                if ENABLE_STATS:
+                    JPEG_CLIENTS.dec()
         # elif path == '/motion.bin':
         #     self.send_response(200)
         #     self.send_header('Age', 0)
@@ -268,28 +272,34 @@ class WebHandler(MetricsHandler):
 
                 self.wfile.write(frame)
 
-                JPEG_BYTES_SENT.observe(len(frame))
+
+                if ENABLE_STATS:
+                    JPEG_BYTES_SENT.observe(len(frame))
             except Exception as e:
                 logging.warning('Error getting frame %s', str(e))
 
-            t2 = datetime.now()
-
-            JPEG_FRAME_SEND_TIME.observe((t2-t1).total_seconds())
+            
+            if ENABLE_STATS:
+                t2 = datetime.now()
+                JPEG_FRAME_SEND_TIME.observe((t2-t1).total_seconds())
 
         else:
             self.send_error(404)
             self.end_headers()
 
 class VideoConnection(object):
-    def __init__(self, addr, conn):
+    def __init__(self, addr, conn, disableStats = False):
         self.addr = addr
         self.conn = conn
         self.error = False
+        self.disableStats = disableStats
 
     def write(self, buf):
         try:
             self.conn.write(buf)
-            H264_BYTES_SENT.observe(len(buf))
+
+            if ENABLE_STATS:
+                H264_BYTES_SENT.observe(len(buf))
         except Exception as e:
             logging.warning('error writing to {}: {}'.format(self.addr, e))
             self.error = True
@@ -318,7 +328,8 @@ class VideoServer(object):
 
         self.accepter = threading.Thread(target=self._accepter)
         self.accepter.start()
-        CLIENTS.observe(0)
+        if ENABLE_STATS:
+            CLIENTS.observe(0)
     
     def close(self):
         self.sock.shutdown(socket.SHUT_RDWR)
@@ -329,7 +340,8 @@ class VideoServer(object):
         for t in self.threads:
             t.join()
 
-        CLIENTS.observe(0)
+        if ENABLE_STATS:
+            CLIENTS.observe(0)
 
     def _writer(self):
         logging.info('writer started.')
@@ -358,9 +370,12 @@ class VideoServer(object):
 
                 # with self.lock:
                 del self.connections[item['addr']]
-                CLIENTS.observe(len(self.connections))
+
+                if ENABLE_STATS:
+                    CLIENTS.observe(len(self.connections))
             else:
-                H264_BYTES_SENT.observe(l)
+                if ENABLE_STATS:
+                    H264_BYTES_SENT.observe(l)
 
             self.queue.task_done()
 
@@ -381,7 +396,8 @@ class VideoServer(object):
             # with self.lock:
             self.connections['{}:{}'.format(*addr)] = conn.makefile('wb')
 
-            CLIENTS.observe(len(self.connections))
+            if ENABLE_STATS:
+                CLIENTS.observe(len(self.connections))
 
             # print('connection added to list of connections', flush=True)
             
@@ -418,6 +434,8 @@ class WebServer(socketserver.ThreadingMixIn, server.HTTPServer):
     def __init__(self, output, *args, **kwargs):
         super(WebServer, self).__init__(*args, **kwargs)
         self.output = output
+        self.exp = re.compile('^([^\?]+)\??.*$')
+        
         # self.motionOutput = motionOutput
 
 # Accept a single connection and make a file-like object out of it
@@ -426,7 +444,8 @@ class WebServer(socketserver.ThreadingMixIn, server.HTTPServer):
 def main(args):
     logging.info('starting picamera')
 
-    INFO.info({'host': socket.gethostname(), 'version':'0.1.0'})
+    if ENABLE_STATS:
+        INFO.info({'host': socket.gethostname(), 'version':'0.1.0'})
 
 
     camera = picamera.PiCamera(resolution=(args.width,args.height), framerate=args.framerate)
@@ -465,12 +484,20 @@ def main(args):
     except KeyboardInterrupt:
         pass
 
+    print('stopping recording')
     camera.stop_recording()
+    print('stopping recording splitter_port=2')
     camera.stop_recording(splitter_port=2)
+    print('server close')
     server.close()
-    notifier.stop()
+    if not notifier is None:
+        print('notifier stop')
+        notifier.stop()
+    print('camera close')
     camera.close()
+    print('webServer shutdown')
     webServer.shutdown()
+    print('done')
 
     # camera.stop_recording()
     # server.close()
