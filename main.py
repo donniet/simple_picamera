@@ -257,11 +257,15 @@ class WebHandler(MetricsHandler):
 
             t1 = datetime.now()
 
-            self.send_response(200)
-            self.send_header('Age', 0)
-            self.send_header('Cache-Control', 'no-cache, private')
-            self.send_header('Pragma', 'no-cache')
-            self.send_header('Content-Type', 'image/jpeg')
+            try:
+                self.send_response(200)
+                self.send_header('Age', 0)
+                self.send_header('Cache-Control', 'no-cache, private')
+                self.send_header('Pragma', 'no-cache')
+                self.send_header('Content-Type', 'image/jpeg')
+            except Exception as e:
+                logging.warning('Error sending frame: {}'.format(e))
+                return
 
             try:
                 with self.server.output.condition:
@@ -286,8 +290,12 @@ class WebHandler(MetricsHandler):
                 JPEG_FRAME_SEND_TIME.observe((t2-t1).total_seconds())
 
         else:
-            self.send_error(404)
-            self.end_headers()
+            try:
+                self.send_error(404)
+                self.end_headers()
+            except Exception as e:
+                logging.warning('error sending 404 from path "{}": {}'.format(path, e))
+
 
 class VideoConnection(object):
     def __init__(self, addr, conn):
