@@ -477,7 +477,7 @@ def main(args):
     else:
         notifier = None
 
-    detectMotion = DetectMotion(camera, magnitude=args.macroblock_magnitude, threshold=args.motion_threshold, notifier=notifier)    
+    # detectMotion = DetectMotion(camera, magnitude=args.macroblock_magnitude, threshold=args.motion_threshold, notifier=notifier)    
 
     logging.info('creating webserver')
     webServer = WebServer(output, ('', args.http_port), WebHandler)
@@ -487,7 +487,7 @@ def main(args):
         camera.start_recording(output, format='mjpeg', splitter_port=2, resize=(args.jpeg_width,args.jpeg_height))
 
         logging.info('starting h264 recorder')
-        camera.start_recording(server, format='h264', level=args.h264_level, profile=args.h264_profile, intra_refresh='cyclic', inline_headers=True, sps_timing=True, motion_output=detectMotion)
+        camera.start_recording(server, format='h264', level=args.h264_level, profile=args.h264_profile, intra_refresh='cyclic', inline_headers=True, sps_timing=True) #, motion_output=detectMotion)
 
         logging.info('starting webserver')
         webServer.serve_forever()
@@ -528,6 +528,7 @@ if __name__ == "__main__":
     parser.add_argument("--h264_level", default="4.2", help="h264 level for picamera library")
     parser.add_argument("--h264_profile", default="high", help="h264 profile for picamera library")
     parser.add_argument("--framerate", default=24, help="video framerate", type=int)
+    
 
     args = parser.parse_args()
     logging.info(args)
