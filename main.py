@@ -452,6 +452,12 @@ class WebServer(socketserver.ThreadingMixIn, server.HTTPServer):
 # connection = server_socket.accept()[0].makefile('wb')
 
 def main(args):
+    numeric_level = getattr(logging, args.log.upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError('Invalid log level: %s' % args.log)
+    logging.basicConfig(level=numeric_level, format='%(asctime)s %(levelname)s %(message)s')
+    
+
     logging.info('starting picamera')
 
     if ENABLE_STATS:
@@ -528,6 +534,7 @@ if __name__ == "__main__":
     parser.add_argument("--h264_level", default="4.2", help="h264 level for picamera library")
     parser.add_argument("--h264_profile", default="high", help="h264 profile for picamera library")
     parser.add_argument("--framerate", default=24, help="video framerate", type=int)
+    parser.add_argument("--log", default="INFO", help="logging level")
     
 
     args = parser.parse_args()
