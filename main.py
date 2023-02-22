@@ -47,6 +47,10 @@ index_HTML = """\
     </head>
     <body>
         <h1>Hello!</h1>
+        <ul>
+            <li><a href="/metrics">Metrics</a></li>
+            <li><a href="/video.jpg">MPEG Video</a></li>
+            <li><a href="/frame.jpg">Single Frame</a></li>
     </body>
 </html>
 """
@@ -75,109 +79,7 @@ class StreamingOutput(object):
                 self.last = t1
 
         return self.buffer.write(buf)
-
-class DetectMotion(picamera.array.PiMotionAnalysis):
-    def __init__(self, camera, magnitude, threshold, notifier):
-        super(DetectMotion, self).__init__(camera, size=None)
-        self.total_motion = 0.
-        self.magnitude = magnitude
-        self.threshold = threshold
-        self.notifier = notifier
-
-
-    def analyze(self, a):
-        a = np.sqrt(
-            np.square(a['x'].astype(np.float)) +
-            np.square(a['y'].astype(np.float))
-            ).clip(0, 255).astype(np.uint8)
-        # If there're more than 10 vectors with a magnitude greater
-        # than 60, then say we've detected motion
-
-        self.total_motion = (a > self.magnitude).sum()
-
-        if ENABLE_STATS:
-            TOTAL_MOTION.observe(self.total_motion)
-
-        # print('total_motion: {}'.format(self.total_motion), flush=True)
-
-        if self.total_motion > self.threshold:
-            #logging.info('Motion detected: {}'.format(self.total_motion))
-            if not self.notifier is None:
-                self.notifier.notify()
-
-class Notifier(object):
-    def __init__(self, url, data=None):
-        self.url = url
-        self.data = data
-
-        self.condition = Condition()
-        self.completed = False
-        self.thread = threading.Thread(target=self.notify_thread)
-        self.thread.start()
-        self.timestamp = 0
-        self.interval = 60
-
-
-    def notify_thread(self):
-        self.condition.acquire()
-
-        while not self.completed:
-            self.condition.wait()
-
-            if self.completed:
-                break
-            
-            n = time.time()
-            if n - self.timestamp < self.interval:
-                continue
-
-            self.timestamp = n
-
-            # no need to hold the lock while we make the request
-            self.condition.release()
-
-            try:
-                logging.info('sending notification')
-                requests.post(self.url, data=self.data)
-            except Exception as e:
-                logging.error('Exception when notifying: {}'.format(e))
-
-            finally:
-                self.condition.acquire()
         
-        self.condition.release()
-
-    def notify(self):
-        with self.condition:
-            self.condition.notify_all()
-    
-    def stop(self):
-        with self.condition:
-            self.completed = True
-            self.condition.notify_all()
-
-        self.thread.join()
-                
-
-
-
-class MotionOutput(object):
-    def __init__(self):
-        self.frame = None
-        self.buffer = io.BytesIO()
-        self.condition = Condition()
-
-    def write(self, buf):
-        self.buffer.seek(0)
-        ret = self.buffer.write(buf)
-        self.buffer.truncate()
-
-        with self.condition:
-            self.frame = self.buffer.getvalue()[:]
-            self.condition.notify_all()
-
-        return ret
-
 class WebHandler(MetricsHandler):
     def log_message(self, *args, **kwargs):
         pass
@@ -456,7 +358,7 @@ def main(args):
     if not isinstance(numeric_level, int):
         raise ValueError('Invalid log level: %s' % args.log)
     logging.basicConfig(level=numeric_level, format='%(asctime)s %(levelname)s %(message)s')
-    
+
 
     logging.info('starting picamera')
 
@@ -476,15 +378,6 @@ def main(args):
     logging.info('creating mjpeg outputer')
     output = StreamingOutput()
 
-    if args.notify != "":
-        logging.info('creating notifier')
-        notifier = Notifier(url=args.notify, data=args.notify_data)
-        # motionOutput = MotionOutput()
-    else:
-        notifier = None
-
-    # detectMotion = DetectMotion(camera, magnitude=args.macroblock_magnitude, threshold=args.motion_threshold, notifier=notifier)    
-
     logging.info('creating webserver')
     webServer = WebServer(output, ('', args.http_port), WebHandler)
 
@@ -493,7 +386,7 @@ def main(args):
         camera.start_recording(output, format='mjpeg', splitter_port=2, resize=(args.jpeg_width,args.jpeg_height))
 
         logging.info('starting h264 recorder')
-        camera.start_recording(server, format='h264', level=args.h264_level, profile=args.h264_profile, intra_refresh='cyclic', inline_headers=True, sps_timing=True) #, motion_output=detectMotion)
+        camera.start_recording(server, format='h264', level=args.h264_level, profile=args.h264_profile, intra_refresh='cyclic', inline_headers=True, sps_timing=True)
 
         logging.info('starting webserver')
         webServer.serve_forever()
@@ -506,9 +399,7 @@ def main(args):
     camera.stop_recording(splitter_port=2)
     print('server close')
     server.close()
-    if not notifier is None:
-        print('notifier stop')
-        notifier.stop()
+
     print('camera close')
     camera.close()
     print('webServer shutdown')
@@ -520,13 +411,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="picamera wrapper for JPEG, MJPEG, H264 and motion analysis")
-    parser.add_argument("--notify", default="http://mirror.local:9080/", help="url to post a notification to")
-    parser.add_argument("--notify_data", default='"on"', help="data to post to notification url")
-    parser.add_argument("--notify_interval", default=60, help="throttle (sec) between notifications")
     parser.add_argument("--http_port", default=8888, help="port to serve http for frames and mjpeg")
     parser.add_argument("--video_port", default=8000, help="port to listen for h264 video frames")
-    parser.add_argument("--macroblock_magnitude", default=60, help="macroblock motion vector minimum magnitude to flag as motion")
-    parser.add_argument("--motion_threshold", default=10, help="number motion macroblocks to trigger full frame motion")
     parser.add_argument("--width", default=1440, help="full frame width for motion analysis and h264")
     parser.add_argument("--height", default=1080, help="full frame height for motion analysis and h264")
     parser.add_argument("--jpeg_width", default=640, help="frame width for JPEG and MJPEG", type=int)
