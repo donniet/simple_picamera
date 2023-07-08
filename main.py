@@ -135,25 +135,6 @@ class WebHandler(MetricsHandler):
             finally:
                 if ENABLE_STATS:
                     JPEG_CLIENTS.dec()
-        # elif path == '/motion.bin':
-        #     self.send_response(200)
-        #     self.send_header('Age', 0)
-        #     self.send_header('Cache-Control', 'no-cache, private')
-        #     self.send_header('Pragma', 'no-cache')
-        #     self.send_header('Content-Type', 'binary/octet-stream')
-
-        #     try:
-        #         with self.server.motionOutput.condition:
-        #             # no need to wait, just get the frame
-        #             # self.server.motionOutput.condition.wait()
-        #             frame = self.server.motionOutput.frame
-                
-        #         self.send_header('Content-Length', len(frame))
-        #         self.end_headers()
-
-        #         self.wfile.write(frame)
-        #     except Exception as e:
-        #         logging.warning('Error getting motion %s', str(e))
 
         elif path == '/frame.jpg':
 
