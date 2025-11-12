@@ -5,7 +5,8 @@ After=network.target
 [Service]
 User=pi
 Group=pi
-ExecStart=/home/pi/src/picamera/venv/bin/python /home/pi/src/picamera/main.py
+#ExecStart=/home/pi/picamera/venv/bin/python /home/pi/picamera/main.py --framerate=12 --jpeg_width=480 --jpeg_height=360 --notify=
+ExecStart=/home/pi/picamera/venv/bin/python /home/pi/picamera/main2.py --width 1440 --height 1080 --address 0.0.0.0 --port 8080 --format YUV420
 Restart=always
 RestartSec=5
 
