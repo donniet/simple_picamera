@@ -1,5 +1,6 @@
 import time
 import io
+import sys
 import logging
 from http import server
 from threading import Condition
@@ -27,21 +28,55 @@ PAGE = """\
 
 class StreamingOutput(io.BufferedIOBase):
     def __init__(self):
+        self.frame_number = 0
         self.frame = None
         self.condition = Condition()
 
     def write(self, buf):
         with self.condition:
-            self.frame = buf
+            self.frame_number = (self.frame_number + 1) % 1e20
+            self.frame = buf[:]             # copy the buffer here
             self.condition.notify_all()
 
 
 class StreamingHandler(server.BaseHTTPRequestHandler):
+    m_kill_message = 'killing server'
+    m_pause_message = 'pausing server'
+    m_restart_message = 'restarting server'
+
     def do_GET(self):
         if self.path == '/':
             self.send_response(301)
             self.send_header('Location', '/index.html')
             self.end_headers()
+        elif self.path == '/kill':
+            self.send_response(200)
+            self.send_header('Age', 0)
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Content-Type', 'text/plain')
+            self.send_header('Content-Length', len(self.m_kill_message))
+            self.end_headers()
+
+            self.wfile.write(self.m_kill_message)
+            self.server.shutdown()
+            sys.exit(0)
+
+            # with self.server.frame_output.condition:
+            #     self.server.frame_output.condition.wait()
+            #     self.server.shutdown()
+            #     sys.exit(0)
+        # elif self.path == '/pause':
+        #     self.send_response(200)
+        #     self.send_header('Age', 0)
+        #     self.send_header('Pragma', 'no-cache')
+        #     self.send_header('Content-Type', 'text/plain')
+        #     self.send_header('Content-Length', len(self.m_pause_message))
+        #     self.end_headers()
+
+        #     self.wfile.write(self.m_kill_message)
+        #     with self.server.frame_output.condition:
+        #         self.server.frame_output.condition.wait()
+
         elif self.path == '/index.html':
             self.send_response(200)
             self.send_header('Content-Type', 'text/html')
@@ -51,7 +86,7 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
         elif self.path == '/frame.jpg':
             with self.server.frame_output.condition:
                 self.server.frame_output.condition.wait()
-                frame = self.server.frame_output.frame[:]
+                frame = self.server.frame_output.frame
 
             self.send_response(200)
             self.send_header('Age', 0)
@@ -62,9 +97,8 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
             self.end_headers()
 
             self.wfile.write(frame)
-            self.wfile.write(b'\r\n')
-
         elif self.path == '/stream.mjpg':
+
             self.send_response(200)
             self.send_header('Age', 0)
             self.send_header('Cache-Control', 'no-cache, private')
@@ -72,10 +106,16 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=FRAME')
             self.end_headers()
             try:
+                frame_number = -1
                 while True:
+                    # time.sleep(1.0 / 15.0)
                     with self.server.frame_output.condition:
                         self.server.frame_output.condition.wait()
-                        frame = self.server.frame_output.frame[:]
+                        if frame_number == self.server.frame_output.frame_number:
+                            continue
+
+                        frame_number = self.server.frame_output.frame_number
+                        frame = self.server.frame_output.frame
 
                     self.wfile.write(b'--FRAME\r\n')
                     self.send_header('Content-Type', 'image/jpeg')
@@ -106,10 +146,16 @@ class StreamingServer(socketserver.ThreadingMixIn, server.HTTPServer):
 
 def main(address, port, width, height, format, jpeg_threads):
     picam2 = Picamera2()
-    config = picam2.create_video_configuration(main={"size": (width, height), "format": format })
+    config = picam2.create_video_configuration(
+        main={"size": (width, height), "format": format }, 
+        controls={"FrameDurationLimits": (100000,100000)})
     picam2.configure(config)
 
     output = StreamingOutput()
+    # maybe this:
+    # output = StreamingOutput(picam2, JpegEncoder(num_threads=jpeg_threads))
+    # output.start()
+    ## output.stop()
 
     picam2.start_recording(JpegEncoder(num_threads=jpeg_threads), FileOutput(output))
     server = StreamingServer(PAGE, output, (address, port), StreamingHandler)
